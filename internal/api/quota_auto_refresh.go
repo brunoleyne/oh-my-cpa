@@ -134,14 +134,23 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 		return quotaAutoRefreshRound{}, err
 	}
 
-	// Fetch active cooldown records so the scheduler can clear expired ones automatically.
-	// A cooldown whose RecoverAtMS has already passed keeps the credential blocked at the
-	// gateway even though the entitlement itself is intact; clearing it here lets traffic
-	// resume without requiring manual intervention from the operator.
+	// Fetch expired CPA cooldowns so the scheduler can clear them automatically. A
+	// cooldown whose RecoverAtMS has already passed keeps the credential blocked at
+	// the gateway even though the entitlement itself is intact; clearing it here lets
+	// traffic resume without requiring manual intervention from the operator.
+	//
+	// BatchExpiredCooldownIndexes queries for error_events rows whose recovery time
+	// is in the past regardless of how old they are, unlike BatchCorrelatedCooldowns
+	// which applies a 6-hour lookback and marks expired cooldowns as inactive.
 	nowMS := h.now().UnixMilli()
-	var cooldowns map[string]repository.ActiveCooldownRecord
+	var expiredCooldownSet map[string]bool
 	if h.repo != nil {
-		cooldowns, _ = h.repo.BatchCorrelatedCooldowns(ctx, authIndexes, nowMS)
+		if expired, err := h.repo.BatchExpiredCooldownIndexes(ctx, authIndexes, nowMS); err == nil && len(expired) > 0 {
+			expiredCooldownSet = make(map[string]bool, len(expired))
+			for _, idx := range expired {
+				expiredCooldownSet[idx] = true
+			}
+		}
 	}
 
 	type dueCredential struct {
@@ -166,10 +175,12 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 			candidate.LastObservedAtMS = snapshot.ObservedAtMS
 			candidate.ResetAtMS = quota.WindowResetTimes(prior.Windows)
 		}
-		// If this credential has a cooldown with a known recovery time that has already
-		// passed, surface it to the trigger so the scheduler can clear the stale evidence.
-		if cd, ok := cooldowns[authIndex]; ok && cd.IsActive && cd.RecoverAtMS != nil && *cd.RecoverAtMS <= nowMS {
-			candidate.ActiveCooldownExpiredAtMS = *cd.RecoverAtMS
+		// If this credential has stale cooldown evidence whose recovery time has passed,
+		// surface it to the trigger so the scheduler clears it. The set comes from a
+		// dedicated query that catches expired cooldowns regardless of age, avoiding the
+		// lookback and IsActive constraints of BatchCorrelatedCooldowns.
+		if expiredCooldownSet[authIndex] {
+			candidate.ActiveCooldownExpiredAtMS = nowMS - 1 // sentinel: known expired
 		}
 		if trigger := quota.AutoRefreshTrigger(settings, candidate, nowMS); trigger != quota.AutoRefreshTriggerNone {
 			due = append(due, dueCredential{file: file, prior: prior, trigger: trigger, observedMS: candidate.LastObservedAtMS})

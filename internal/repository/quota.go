@@ -503,3 +503,64 @@ func (r *Repository) QueryCredentialModelWindowUsage(ctx context.Context, authIn
 	}
 	return result, rows.Err()
 }
+
+// BatchExpiredCooldownIndexes returns auth indexes that have stale CPA cooldown evidence:
+// rows with quota_exceeded = 1 and a next_recover_at_ms that has already passed. These
+// credentials are blocked at the gateway even though their entitlement is intact, because
+// nobody has cleared the local error evidence yet. The scheduler uses this to auto-clear
+// them without manual operator intervention.
+//
+// Unlike BatchCorrelatedCooldowns, this query does not require the recovery time to be
+// in the future or the event to be recent — it catches cooldowns that expired hours or
+// days ago and were never cleaned up.
+func (r *Repository) BatchExpiredCooldownIndexes(ctx context.Context, authIndexes []string, nowMS int64) ([]string, error) {
+	if r == nil || r.SQL() == nil || len(authIndexes) == 0 {
+		return nil, nil
+	}
+
+	validIndexes := make([]string, 0, len(authIndexes))
+	for _, authIndex := range authIndexes {
+		trimmed := strings.TrimSpace(authIndex)
+		if trimmed != "" {
+			validIndexes = append(validIndexes, trimmed)
+		}
+	}
+	if len(validIndexes) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(validIndexes))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]any, 0, len(validIndexes)+1)
+	args = append(args, nowMS)
+	for _, authIndex := range validIndexes {
+		args = append(args, authIndex)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT DISTINCT auth_index
+		FROM error_events
+		WHERE quota_exceeded = 1
+		  AND next_recover_at_ms IS NOT NULL
+		  AND next_recover_at_ms > 0
+		  AND next_recover_at_ms <= ?
+		  AND auth_index IN (%s)
+	`, placeholders)
+
+	rows, err := r.SQL().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query expired cooldowns: %w", err)
+	}
+	defer rows.Close()
+
+	var expired []string
+	for rows.Next() {
+		var authIndex string
+		if err := rows.Scan(&authIndex); err != nil {
+			return expired, fmt.Errorf("scan expired cooldown: %w", err)
+		}
+		expired = append(expired, authIndex)
+	}
+	return expired, rows.Err()
+}
