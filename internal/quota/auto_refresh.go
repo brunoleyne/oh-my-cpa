@@ -138,10 +138,10 @@ func ResolveAutoRefreshSettings(raw string, isStored bool) AutoRefreshSettings {
 
 // Automatic refresh triggers, reported in the loop's summary.
 const (
-	AutoRefreshTriggerNone             = ""
-	AutoRefreshTriggerReset            = "reset"
-	AutoRefreshTriggerInterval         = "interval"
-	AutoRefreshTriggerCooldownExpired  = "cooldown_expired"
+	AutoRefreshTriggerNone            = ""
+	AutoRefreshTriggerReset           = "reset"
+	AutoRefreshTriggerInterval        = "interval"
+	AutoRefreshTriggerCooldownExpired = "cooldown_expired"
 )
 
 // AutoRefreshCandidate is what the scheduler knows about one credential at a tick.
