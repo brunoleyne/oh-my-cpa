@@ -326,6 +326,18 @@ func (r *Repository) GetQuotaRefreshAttempts(ctx context.Context, authIndexes []
 	return result, rows.Err()
 }
 
+// HasCooldownEvidence reports whether an auth index still has stored quota_exceeded evidence.
+func (r *Repository) HasCooldownEvidence(ctx context.Context, authIndex string) (bool, error) {
+	if r == nil || r.SQL() == nil {
+		return false, errors.New("repository is not initialized")
+	}
+	var exists bool
+	err := r.SQL().QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM error_events WHERE auth_index = ? AND quota_exceeded = 1)
+	`, strings.TrimSpace(authIndex)).Scan(&exists)
+	return exists, err
+}
+
 // ClearCooldownEvidence durably resets local quota_exceeded flags in error_events when cooldown is cleared.
 func (r *Repository) ClearCooldownEvidence(ctx context.Context, authIndex string) error {
 	if r == nil || r.SQL() == nil {
