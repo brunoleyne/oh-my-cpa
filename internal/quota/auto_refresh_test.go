@@ -139,6 +139,45 @@ func TestAutoRefreshTrigger(t *testing.T) {
 			c.LastAttemptAtMS = nowMS - 60*minute
 			return c
 		}(), AutoRefreshTriggerReset},
+		// Cooldown-expired trigger: a CPA cooldown whose RecoverAtMS is in the past fires
+		// regardless of the interval and reset settings, because the entitlement is intact
+		// but the gateway keeps the credential blocked until the evidence is cleared.
+		{"expired cooldown triggers clear even with all other triggers off", AutoRefreshSettings{}, func() AutoRefreshCandidate {
+			c := read(30 * minute)
+			c.ActiveCooldownExpiredAtMS = nowMS - 2*minute
+			c.IsSupported = true
+			c.Provider = "codex"
+			return c
+		}(), AutoRefreshTriggerCooldownExpired},
+		{"expired cooldown is checked before interval", intervalOnly, func() AutoRefreshCandidate {
+			c := read(60 * minute)
+			c.ActiveCooldownExpiredAtMS = nowMS - 5*minute
+			c.IsSupported = true
+			c.Provider = "claude"
+			return c
+		}(), AutoRefreshTriggerCooldownExpired},
+		{"cooldown not yet expired does not trigger", AutoRefreshSettings{}, func() AutoRefreshCandidate {
+			c := read(30 * minute)
+			c.ActiveCooldownExpiredAtMS = nowMS + 5*minute
+			c.IsSupported = true
+			c.Provider = "codex"
+			return c
+		}(), AutoRefreshTriggerNone},
+		{"zero ActiveCooldownExpiredAtMS does not trigger", AutoRefreshSettings{}, func() AutoRefreshCandidate {
+			c := read(30 * minute)
+			c.ActiveCooldownExpiredAtMS = 0
+			c.IsSupported = true
+			c.Provider = "codex"
+			return c
+		}(), AutoRefreshTriggerNone},
+		{"expired cooldown on disabled credential does not trigger", AutoRefreshSettings{}, func() AutoRefreshCandidate {
+			c := read(30 * minute)
+			c.ActiveCooldownExpiredAtMS = nowMS - 2*minute
+			c.IsDisabled = true
+			c.IsSupported = true
+			c.Provider = "codex"
+			return c
+		}(), AutoRefreshTriggerNone},
 	}
 	for _, tc := range cases {
 		if got := AutoRefreshTrigger(tc.settings, tc.candidate, nowMS); got != tc.want {

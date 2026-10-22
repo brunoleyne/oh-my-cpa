@@ -43,10 +43,11 @@ type quotaAutoRefreshState struct {
 
 // quotaAutoRefreshRound summarizes one round for the service log.
 type quotaAutoRefreshRound struct {
-	Due       int
-	Refreshed int
-	Failed    int
-	ByReset   int
+	Due              int
+	Refreshed        int
+	Failed           int
+	ByReset          int
+	CooldownsCleared int
 }
 
 // RunQuotaAutoRefresh reads due credentials' quotas in the background until ctx ends.
@@ -69,7 +70,8 @@ func (h *Handler) RunQuotaAutoRefresh(ctx context.Context) error {
 			h.logQuotaAutoRefreshFailure(err)
 			if round.Due > 0 && h.logger != nil {
 				h.logger.Info("automatic quota refresh round",
-					"due", round.Due, "refreshed", round.Refreshed, "failed", round.Failed, "after_reset", round.ByReset)
+					"due", round.Due, "refreshed", round.Refreshed, "failed", round.Failed,
+					"after_reset", round.ByReset, "cooldowns_cleared", round.CooldownsCleared)
 			}
 		}
 	}
@@ -132,13 +134,22 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 		return quotaAutoRefreshRound{}, err
 	}
 
+	// Fetch active cooldown records so the scheduler can clear expired ones automatically.
+	// A cooldown whose RecoverAtMS has already passed keeps the credential blocked at the
+	// gateway even though the entitlement itself is intact; clearing it here lets traffic
+	// resume without requiring manual intervention from the operator.
+	nowMS := h.now().UnixMilli()
+	var cooldowns map[string]repository.ActiveCooldownRecord
+	if h.repo != nil {
+		cooldowns, _ = h.repo.BatchCorrelatedCooldowns(ctx, authIndexes, nowMS)
+	}
+
 	type dueCredential struct {
 		file       management.AuthFile
 		prior      *quota.NormalizedQuota
 		trigger    string
 		observedMS int64
 	}
-	nowMS := h.now().UnixMilli()
 	lastAttempts := h.quotaAutoRefresh.snapshotAttempts()
 	due := make([]dueCredential, 0)
 	for _, authIndex := range authIndexes {
@@ -154,6 +165,11 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 			prior = normalizedQuotaFromSnapshot(authIndex, snapshot)
 			candidate.LastObservedAtMS = snapshot.ObservedAtMS
 			candidate.ResetAtMS = quota.WindowResetTimes(prior.Windows)
+		}
+		// If this credential has a cooldown with a known recovery time that has already
+		// passed, surface it to the trigger so the scheduler can clear the stale evidence.
+		if cd, ok := cooldowns[authIndex]; ok && cd.IsActive && cd.RecoverAtMS != nil && *cd.RecoverAtMS <= nowMS {
+			candidate.ActiveCooldownExpiredAtMS = *cd.RecoverAtMS
 		}
 		if trigger := quota.AutoRefreshTrigger(settings, candidate, nowMS); trigger != quota.AutoRefreshTriggerNone {
 			due = append(due, dueCredential{file: file, prior: prior, trigger: trigger, observedMS: candidate.LastObservedAtMS})
@@ -187,6 +203,24 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+
+			// A cooldown whose recovery time has passed needs a clear, not a quota read.
+			// The clear calls CPA's ResetQuota and wipes the local error evidence so the
+			// gateway immediately resumes routing to that credential.
+			if trigger == quota.AutoRefreshTriggerCooldownExpired {
+				clearErr := svc.ClearCPACooldown(ctx, strings.TrimSpace(file.AuthIndex))
+				if clearErr == nil && h.repo != nil {
+					_ = h.repo.ClearCooldownEvidence(ctx, strings.TrimSpace(file.AuthIndex))
+				}
+				countMu.Lock()
+				defer countMu.Unlock()
+				if clearErr != nil {
+					round.Failed++
+				} else {
+					round.CooldownsCleared++
+				}
+				return
+			}
 
 			refreshed, err := h.refreshQuotaReading(ctx, svc, file, prior)
 			// The same persistence rule as a manual refresh: a failed or stale read

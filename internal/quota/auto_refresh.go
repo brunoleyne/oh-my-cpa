@@ -138,9 +138,10 @@ func ResolveAutoRefreshSettings(raw string, isStored bool) AutoRefreshSettings {
 
 // Automatic refresh triggers, reported in the loop's summary.
 const (
-	AutoRefreshTriggerNone     = ""
-	AutoRefreshTriggerReset    = "reset"
-	AutoRefreshTriggerInterval = "interval"
+	AutoRefreshTriggerNone             = ""
+	AutoRefreshTriggerReset            = "reset"
+	AutoRefreshTriggerInterval         = "interval"
+	AutoRefreshTriggerCooldownExpired  = "cooldown_expired"
 )
 
 // AutoRefreshCandidate is what the scheduler knows about one credential at a tick.
@@ -151,6 +152,11 @@ type AutoRefreshCandidate struct {
 	LastObservedAtMS int64 // zero when the credential has never been read
 	LastAttemptAtMS  int64 // zero when this process has not tried it
 	ResetAtMS        []int64
+	// ActiveCooldownExpiredAtMS is the recovery timestamp from a CPA cooldown that has
+	// already passed. A non-zero value means the cooldown is no longer active by the
+	// clock but the local evidence has not been cleared yet, so the credential stays
+	// blocked until the scheduler calls clearQuotaCooldown on its behalf.
+	ActiveCooldownExpiredAtMS int64
 }
 
 // IsAutoRefreshProvider reports whether the scheduler may read a provider on its own.
@@ -189,6 +195,15 @@ func AutoRefreshTrigger(settings AutoRefreshSettings, candidate AutoRefreshCandi
 				return AutoRefreshTriggerReset
 			}
 		}
+	}
+	// A CPA cooldown whose recovery time has already passed blocks the credential from
+	// serving traffic even though the entitlement itself is intact. The scheduler clears
+	// the stale local evidence so the gateway resumes routing on its own, without
+	// requiring the operator to click "Clear cooldown" for every affected credential.
+	// Only a non-zero RecoverAtMS value that is already in the past qualifies: unknown
+	// or future recovery times stay as they are.
+	if candidate.ActiveCooldownExpiredAtMS > 0 && candidate.ActiveCooldownExpiredAtMS <= nowMS {
+		return AutoRefreshTriggerCooldownExpired
 	}
 	if settings.IntervalMinutes > 0 {
 		lastMS := max(candidate.LastObservedAtMS, candidate.LastAttemptAtMS)
