@@ -2392,10 +2392,11 @@ Credential Quota panel already does, so a background reading appears on an open 
 A CPA cooldown is released automatically in two cases (ADR 0094). `refreshQuotaReading`
 releases a credential that still holds `quota_exceeded` evidence once a fresh, usable
 read shows room in every published window (`quota.HasRestoredCapacity`), and each loop
-round releases a credential whose every stored `next_recover_at_ms` has passed
-(`Repository.BatchExpiredCooldowns`). Either release calls CPA's
-`routing/cooldown/reset`, wipes the evidence through `Repository.ClearCooldownEvidence`,
-as the operator's Clear Cooldown does, and logs the `auth_index`.
+round releases an enabled credential whose every stored `next_recover_at_ms` and
+`next_retry_after_ms` has passed (`Repository.BatchExpiredCooldowns`), whether or not its
+provider can be read. Either release calls CPA's `routing/cooldown/reset`, wipes the
+evidence through `Repository.ClearCooldownEvidence`, as the operator's Clear Cooldown
+does, logs the `auth_index` and records a `quota.clear_cooldown.automatic` audit event.
 
 Codex reset-credit redemption is offered in the credential Drawer's Quota tab and never
 from a list row, because it spends an irreversible entitlement; it is offered whenever the

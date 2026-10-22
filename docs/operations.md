@@ -533,9 +533,11 @@ operator-only reads. A demonstration never runs it.
 
 Any read, manual or automatic, that shows room in every window releases a credential CPA
 still holds in cooldown, because providers can reset a quota before the recovery time they
-announced. While the policy is on, each round also releases a credential whose recorded
-recovery times have all passed. Each release is logged as `CPA cooldown cleared after
-quota restored` or `expired CPA cooldown cleared`, with the `auth_index`.
+announced. While the policy is on, each round also releases an enabled credential whose
+recorded recovery times have all passed, including Meta and providers without a quota
+probe. Each release is logged as `CPA cooldown cleared after quota restored` or `expired
+CPA cooldown cleared` with the `auth_index`, and appears in the audit log as
+`quota.clear_cooldown.automatic`.
 
 ## Meta quota and live subscription tiers
 

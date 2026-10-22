@@ -98,11 +98,14 @@ that is fresh, usable and shows room in every published window
 (`quota.HasRestoredCapacity`) releases a credential that still holds evidence, whichever
 surface asked for the read: providers reset quotas before the recovery time they
 announced, and the credential could serve again. Second, each round of the loop releases
-a credential whose every stored recovery time has passed
-(`Repository.BatchExpiredCooldowns`, with no lookback window). A newer cooldown that has
-not recovered yet keeps the credential blocked even when an older one has passed. Both
-log every release with its `auth_index`. The second runs only inside the loop, so a
-deployment with both triggers off keeps operator-only clears for expired cooldowns.
+an enabled credential whose every stored recovery and retry time has passed
+(`Repository.BatchExpiredCooldowns`, with no lookback window), including providers the
+loop never reads, because a clear is not a read. A newer cooldown that has not recovered
+yet keeps the credential blocked even when an older one has passed. Each release is
+logged with its `auth_index` and audited as `quota.clear_cooldown.automatic` with the
+reason `capacity_restored` or `recovery_time_passed`; a CPA failure keeps only its HTTP
+status. The second runs only inside the loop, so a deployment with both triggers off
+keeps operator-only clears for expired cooldowns.
 
 ## Consequences
 

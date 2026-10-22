@@ -94,16 +94,14 @@ func (h *Handler) releaseRestoredCooldown(ctx context.Context, svc *quota.Servic
 	if err != nil || !hasEvidence {
 		return
 	}
-	if err := svc.ClearCPACooldown(ctx, authIndex); err != nil {
-		if h.logger != nil {
-			h.logger.Warn("restored quota but CPA cooldown clear failed", "auth_index", authIndex, "error", err.Error())
-		}
-		return
+	clearErr := svc.ClearCPACooldown(ctx, authIndex)
+	var evidenceErr error
+	if clearErr == nil {
+		evidenceErr = h.repo.ClearCooldownEvidence(ctx, authIndex)
 	}
-	if err := h.repo.ClearCooldownEvidence(ctx, authIndex); err != nil {
-		if h.logger != nil {
-			h.logger.Warn("CPA cooldown released but local evidence not cleared", "auth_index", authIndex, "error", err.Error())
-		}
+	h.recordAutomaticCooldownClear(authIndex, "capacity_restored", clearErr, evidenceErr)
+	if clearErr != nil || evidenceErr != nil {
+		h.logCooldownClearFailure("quota restored but CPA cooldown release failed", authIndex, 0, clearErr, evidenceErr)
 		return
 	}
 	// The reading carried the prior cooldown forward; the response must show what it is now.

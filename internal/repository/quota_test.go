@@ -476,20 +476,24 @@ func TestBatchExpiredCooldownsReportsOnlyFullyRecoveredEvidence(t *testing.T) {
 	}
 	nowMS := time.Now().UnixMilli()
 	hour := time.Hour.Milliseconds()
-	insert := func(eventKey, authIndex string, quotaExceeded int, recoverAtMS any) {
+	insertWithRetry := func(eventKey, authIndex string, quotaExceeded int, recoverAtMS, retryAtMS any) {
 		t.Helper()
 		if _, err := repo.SQL().ExecContext(ctx, `
 			INSERT INTO error_events (
 				instance_id, event_key, provider, model, auth_index, status_code, body,
 				retryable, auth_status, auth_disabled, auth_unavailable, quota_exceeded,
-				quota_reason, next_recover_at_ms, timestamp_ms, created_at_ms
+				quota_reason, next_recover_at_ms, next_retry_after_ms, timestamp_ms, created_at_ms
 			) VALUES (
 				'default', ?, 'codex', 'gpt-5', ?, 429, 'usage limit reached',
-				1, 'active', 0, 0, ?, 'usage_limit_reached', ?, ?, ?
+				1, 'active', 0, 0, ?, 'usage_limit_reached', ?, ?, ?, ?
 			)
-		`, eventKey, authIndex, quotaExceeded, recoverAtMS, nowMS-24*hour, nowMS-24*hour); err != nil {
+		`, eventKey, authIndex, quotaExceeded, recoverAtMS, retryAtMS, nowMS-24*hour, nowMS-24*hour); err != nil {
 			t.Fatalf("insert %s failed: %v", eventKey, err)
 		}
+	}
+	insert := func(eventKey, authIndex string, quotaExceeded int, recoverAtMS any) {
+		t.Helper()
+		insertWithRetry(eventKey, authIndex, quotaExceeded, recoverAtMS, nil)
 	}
 	// Recovered long ago, well past the 6-hour lookback of BatchCorrelatedCooldowns.
 	insert("old-1", "auth-old", 1, nowMS-20*hour)
@@ -499,8 +503,10 @@ func TestBatchExpiredCooldownsReportsOnlyFullyRecoveredEvidence(t *testing.T) {
 	insert("mixed-past", "auth-mixed", 1, nowMS-7*hour)
 	insert("mixed-future", "auth-mixed", 1, nowMS+hour)
 	insert("no-recover", "auth-no-recover", 1, nil)
+	insert("retry-recovered", "auth-retry", 1, nowMS-7*hour)
+	insertWithRetry("retry-ahead", "auth-retry", 1, nil, nowMS+hour)
 
-	expired, err := repo.BatchExpiredCooldowns(ctx, []string{"auth-old", "auth-cleared", "auth-future", "auth-mixed", "auth-no-recover", " "}, nowMS)
+	expired, err := repo.BatchExpiredCooldowns(ctx, []string{"auth-old", "auth-cleared", "auth-future", "auth-mixed", "auth-no-recover", "auth-retry", " "}, nowMS)
 	if err != nil {
 		t.Fatal(err)
 	}

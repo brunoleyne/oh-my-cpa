@@ -152,10 +152,9 @@ type AutoRefreshCandidate struct {
 	LastObservedAtMS int64 // zero when the credential has never been read
 	LastAttemptAtMS  int64 // zero when this process has not tried it
 	ResetAtMS        []int64
-	// ActiveCooldownExpiredAtMS is the recovery timestamp from a CPA cooldown that has
-	// already passed. A non-zero value means the cooldown is no longer active by the
-	// clock but the local evidence has not been cleared yet, so the credential stays
-	// blocked until the scheduler calls clearQuotaCooldown on its behalf.
+	// ActiveCooldownExpiredAtMS is the latest recovery time of stored cooldown evidence once
+	// every one of them has passed, or zero. CPA keeps the credential blocked until that
+	// evidence is cleared, whatever the clock says.
 	ActiveCooldownExpiredAtMS int64
 }
 
@@ -177,10 +176,14 @@ func IsAutoRefreshProvider(provider string) bool {
 // the newer of the observation and the attempt, so a failing scheduled read waits a
 // whole interval too.
 func AutoRefreshTrigger(settings AutoRefreshSettings, candidate AutoRefreshCandidate, nowMS int64) string {
-	if candidate.IsDisabled || !candidate.IsSupported || !IsAutoRefreshProvider(candidate.Provider) {
+	if candidate.IsDisabled {
 		return AutoRefreshTriggerNone
 	}
-	if settings.IsRefreshOnResetEnabled && candidate.LastObservedAtMS > 0 {
+	// Clearing a cooldown is not a read: it needs no probe and exchanges no key, so it
+	// applies to every enabled credential. A due reset read still goes first, because a
+	// read that finds capacity releases the cooldown as well.
+	isReadable := candidate.IsSupported && IsAutoRefreshProvider(candidate.Provider)
+	if isReadable && settings.IsRefreshOnResetEnabled && candidate.LastObservedAtMS > 0 {
 		graceMS := AUTO_REFRESH_RESET_GRACE.Milliseconds()
 		for _, resetAtMS := range candidate.ResetAtMS {
 			dueAtMS := resetAtMS + graceMS
@@ -196,16 +199,10 @@ func AutoRefreshTrigger(settings AutoRefreshSettings, candidate AutoRefreshCandi
 			}
 		}
 	}
-	// A CPA cooldown whose recovery time has already passed blocks the credential from
-	// serving traffic even though the entitlement itself is intact. The scheduler clears
-	// the stale local evidence so the gateway resumes routing on its own, without
-	// requiring the operator to click "Clear cooldown" for every affected credential.
-	// Only a non-zero RecoverAtMS value that is already in the past qualifies: unknown
-	// or future recovery times stay as they are.
 	if candidate.ActiveCooldownExpiredAtMS > 0 && candidate.ActiveCooldownExpiredAtMS <= nowMS {
 		return AutoRefreshTriggerCooldownExpired
 	}
-	if settings.IntervalMinutes > 0 {
+	if isReadable && settings.IntervalMinutes > 0 {
 		lastMS := max(candidate.LastObservedAtMS, candidate.LastAttemptAtMS)
 		intervalMS := int64(settings.IntervalMinutes) * time.Minute.Milliseconds()
 		if lastMS == 0 || nowMS-lastMS+AUTO_REFRESH_INTERVAL_SLACK.Milliseconds() >= intervalMS {

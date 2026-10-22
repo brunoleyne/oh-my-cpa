@@ -1012,12 +1012,15 @@ the retained numbers and the row's own refresh control.
 
 Automatic cooldown release follows the same split. `internal/quota/attempt_test.go` owns
 `quota.HasRestoredCapacity`, which excludes stale, disabled, unpublished and used-up
-readings. `internal/repository/quota_test.go` owns `BatchExpiredCooldowns`: evidence past
-the six-hour lookback still counts, while cleared rows, rows without a recovery time and a
-credential with a newer cooldown still in force do not. `internal/api/quota_auto_refresh_test.go`
-owns the wire against a gateway that counts `routing/cooldown/reset` calls: a read with
-room left releases the credential and wipes its evidence, an exhausted read keeps both,
-and a round releases only the credential whose cooldown fully recovered.
+readings. `internal/quota/auto_refresh_test.go` owns the trigger order: a due reset read
+goes first, and an expired cooldown is cleared for providers the loop never reads.
+`internal/repository/quota_test.go` owns `BatchExpiredCooldowns`: evidence past the
+six-hour lookback still counts, while cleared rows, rows without a recovery time and a
+credential with a newer cooldown or retry time still ahead do not.
+`internal/api/quota_auto_refresh_test.go` owns the wire against a gateway that counts
+`routing/cooldown/reset` calls: a read with room left releases the credential, wipes its
+evidence and audits the release, an exhausted read keeps all three, and a round releases
+only the credential whose cooldown fully recovered.
 
 ### Quota capacity coverage
 

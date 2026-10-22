@@ -352,6 +352,9 @@ func TestQuotaAutoRefreshClearsOnlyRecoveredCooldowns(t *testing.T) {
 	if remaining != 3 {
 		t.Fatalf("still-blocked credentials keep %d rows of cooldown evidence, want 3", remaining)
 	}
+	if clears := automaticCooldownClears(t, handler); len(clears) != 1 || clears["codex-fresh"] != "recovery_time_passed" {
+		t.Fatalf("audited automatic clears = %v, want only codex-fresh after its recovery time", clears)
+	}
 
 	if round, err := handler.runQuotaAutoRefreshRound(ctx); err != nil || round.Due != 0 {
 		t.Fatalf("second round = %+v err=%v, want nothing due", round, err)
@@ -413,6 +416,9 @@ func TestQuotaReadReleasesACooldownOnceCapacityIsBack(t *testing.T) {
 	if status := snapshots["codex-unread"].Status; status != "healthy" {
 		t.Fatalf("stored reading status = %q, want healthy", status)
 	}
+	if clears := automaticCooldownClears(t, handler); len(clears) != 1 || clears["codex-unread"] != "capacity_restored" {
+		t.Fatalf("audited automatic clears = %v, want only codex-unread after its read", clears)
+	}
 }
 
 func TestQuotaReadKeepsTheCooldownWhileAWindowIsUsedUp(t *testing.T) {
@@ -433,4 +439,23 @@ func TestQuotaReadKeepsTheCooldownWhileAWindowIsUsedUp(t *testing.T) {
 	if rows := cooldownEvidenceRows(t, handler, "codex-unread"); rows != 1 {
 		t.Fatalf("codex-unread keeps %d rows of cooldown evidence, want 1", rows)
 	}
+	if clears := automaticCooldownClears(t, handler); len(clears) != 0 {
+		t.Fatalf("audited automatic clears = %v, want none", clears)
+	}
+}
+
+// automaticCooldownClears lists the audited automatic releases as auth_index -> reason.
+func automaticCooldownClears(t *testing.T, handler *Handler) map[string]string {
+	t.Helper()
+	events, err := handler.repo.ListAuditEvents(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clears := map[string]string{}
+	for _, event := range events {
+		if event.Action == "quota.clear_cooldown.automatic" && event.Result == "success" {
+			clears[event.TargetID], _ = event.Details["reason"].(string)
+		}
+	}
+	return clears
 }

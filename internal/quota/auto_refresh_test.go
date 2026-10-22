@@ -170,6 +170,23 @@ func TestAutoRefreshTrigger(t *testing.T) {
 			c.Provider = "codex"
 			return c
 		}(), AutoRefreshTriggerNone},
+		{"expired cooldown is cleared for a provider without a probe", AutoRefreshSettings{}, func() AutoRefreshCandidate {
+			c := read(30 * minute)
+			c.ActiveCooldownExpiredAtMS = nowMS - 2*minute
+			c.IsSupported = false
+			return c
+		}(), AutoRefreshTriggerCooldownExpired},
+		{"expired cooldown is cleared for meta, which is never read on its own", both, func() AutoRefreshCandidate {
+			c := read(31*minute, 2*minute)
+			c.ActiveCooldownExpiredAtMS = nowMS - 2*minute
+			c.Provider = "meta"
+			return c
+		}(), AutoRefreshTriggerCooldownExpired},
+		{"a due reset read goes before an expired cooldown", both, func() AutoRefreshCandidate {
+			c := read(31*minute, 2*minute)
+			c.ActiveCooldownExpiredAtMS = nowMS - 2*minute
+			return c
+		}(), AutoRefreshTriggerReset},
 		{"expired cooldown on disabled credential does not trigger", AutoRefreshSettings{}, func() AutoRefreshCandidate {
 			c := read(30 * minute)
 			c.ActiveCooldownExpiredAtMS = nowMS - 2*minute

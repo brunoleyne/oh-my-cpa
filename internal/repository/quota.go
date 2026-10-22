@@ -517,9 +517,9 @@ func (r *Repository) QueryCredentialModelWindowUsage(ctx context.Context, authIn
 }
 
 // BatchExpiredCooldowns returns, per auth index, the latest recovery time of its stored
-// quota_exceeded evidence, but only when every such recovery time has already passed. It has no
-// lookback window, so a cooldown that expired days ago and was never cleared is still reported.
-// Rows already cleared (quota_exceeded = 0) and rows with no recovery time are never returned.
+// quota_exceeded evidence, but only when every such recovery time and retry time has already
+// passed. It has no lookback window, so a cooldown that expired days ago and was never cleared is
+// still reported. Rows already cleared (quota_exceeded = 0) are never returned.
 func (r *Repository) BatchExpiredCooldowns(ctx context.Context, authIndexes []string, nowMS int64) (map[string]int64, error) {
 	result := make(map[string]int64)
 	if r == nil || r.SQL() == nil || len(authIndexes) == 0 {
@@ -539,17 +539,18 @@ func (r *Repository) BatchExpiredCooldowns(ctx context.Context, authIndexes []st
 	for _, authIndex := range validIndexes {
 		args = append(args, authIndex)
 	}
-	args = append(args, nowMS)
+	args = append(args, nowMS, nowMS)
+	// A newer cooldown that has not recovered yet keeps the credential blocked, even when an
+	// older one has already passed; so does a retry time still ahead.
 	query := fmt.Sprintf(`
 		SELECT auth_index, MAX(next_recover_at_ms)
 		FROM error_events
 		WHERE quota_exceeded = 1
-		  AND next_recover_at_ms > 0
 		  AND auth_index IN (%s)
 		GROUP BY auth_index
-		-- A newer cooldown that has not recovered yet keeps the credential blocked, even
-		-- when an older one has already passed.
-		HAVING MAX(next_recover_at_ms) <= ?
+		HAVING MAX(COALESCE(next_recover_at_ms, 0)) > 0
+		  AND MAX(COALESCE(next_recover_at_ms, 0)) <= ?
+		  AND MAX(COALESCE(next_retry_after_ms, 0)) <= ?
 	`, placeholders)
 	rows, err := r.SQL().QueryContext(ctx, query, args...)
 	if err != nil {

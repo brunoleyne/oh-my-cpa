@@ -134,14 +134,9 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 		return quotaAutoRefreshRound{}, err
 	}
 
-	// Fetch expired CPA cooldowns so the scheduler can clear them automatically. A
-	// cooldown whose RecoverAtMS has already passed keeps the credential blocked at
-	// the gateway even though the entitlement itself is intact; clearing it here lets
-	// traffic resume without requiring manual intervention from the operator.
-	//
-	// BatchExpiredCooldowns reports credentials whose every stored recovery time is in
-	// the past regardless of how old it is, unlike BatchCorrelatedCooldowns which
-	// applies a 6-hour lookback and marks expired cooldowns as inactive.
+	// A cooldown whose recovery times have all passed still blocks the credential until its
+	// evidence is cleared. BatchCorrelatedCooldowns cannot find it: its six-hour lookback
+	// drops evidence that expired earlier, which is exactly the evidence nobody cleared.
 	nowMS := h.now().UnixMilli()
 	var expiredCooldowns map[string]int64
 	if h.repo != nil {
@@ -175,10 +170,6 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 			candidate.LastObservedAtMS = snapshot.ObservedAtMS
 			candidate.ResetAtMS = quota.WindowResetTimes(prior.Windows)
 		}
-		// If this credential has stale cooldown evidence whose recovery time has passed,
-		// surface it to the trigger so the scheduler clears it. The set comes from a
-		// dedicated query that catches expired cooldowns regardless of age, avoiding the
-		// lookback and IsActive constraints of BatchCorrelatedCooldowns.
 		if recoverAtMS, ok := expiredCooldowns[authIndex]; ok {
 			candidate.ActiveCooldownExpiredAtMS = recoverAtMS
 		}
@@ -215,9 +206,8 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// A cooldown whose recovery time has passed needs a clear, not a quota read.
-			// The clear calls CPA's ResetQuota and wipes the local error evidence so the
-			// gateway immediately resumes routing to that credential.
+			// An expired cooldown needs a clear, not a read: the same CPA reset and evidence
+			// wipe the operator's Clear Cooldown performs.
 			if trigger == quota.AutoRefreshTriggerCooldownExpired {
 				authIndex := strings.TrimSpace(file.AuthIndex)
 				clearErr := svc.ClearCPACooldown(ctx, authIndex)
@@ -232,6 +222,7 @@ func (h *Handler) runQuotaAutoRefreshRound(ctx context.Context) (quotaAutoRefres
 				} else {
 					round.CooldownsCleared++
 				}
+				h.recordAutomaticCooldownClear(authIndex, "recovery_time_passed", clearErr, evidenceErr)
 				h.logExpiredCooldownClear(authIndex, recoverAtMS, clearErr, evidenceErr)
 				return
 			}
@@ -311,17 +302,53 @@ func (s *quotaAutoRefreshState) forgetExcept(current map[string]management.AuthF
 }
 
 // logExpiredCooldownClear records every automatic release by credential, so an operator can see
-// which credential was released, when its recovery time had passed, and whether it failed.
+// which credential was released and when its recovery time had passed.
 func (h *Handler) logExpiredCooldownClear(authIndex string, recoverAtMS int64, clearErr, evidenceErr error) {
+	if clearErr != nil || evidenceErr != nil {
+		h.logCooldownClearFailure("expired CPA cooldown clear failed", authIndex, recoverAtMS, clearErr, evidenceErr)
+		return
+	}
+	if h.logger != nil {
+		h.logger.Info("expired CPA cooldown cleared", "auth_index", authIndex, "recover_at_ms", recoverAtMS)
+	}
+}
+
+// logCooldownClearFailure names which step of an automatic release failed. CPA errors can carry
+// upstream bodies, so only their status is kept, as the redemption path does.
+func (h *Handler) logCooldownClearFailure(message, authIndex string, recoverAtMS int64, clearErr, evidenceErr error) {
 	if h.logger == nil {
 		return
 	}
+	attrs := []any{"auth_index", authIndex}
+	if recoverAtMS > 0 {
+		attrs = append(attrs, "recover_at_ms", recoverAtMS)
+	}
+	if clearErr != nil {
+		attrs = append(attrs, "step", "cpa_reset", "status_code", cpaErrorStatus(clearErr))
+	} else {
+		attrs = append(attrs, "step", "evidence_wipe", "error", evidenceErr.Error())
+	}
+	h.logger.Warn(message, attrs...)
+}
+
+// recordAutomaticCooldownClear keeps an automatic release in the audit trail beside the
+// operator's quota.clear_cooldown, because both change what CPA routes to.
+func (h *Handler) recordAutomaticCooldownClear(authIndex, reason string, clearErr, evidenceErr error) {
+	result, details := "success", map[string]any{"reason": reason}
 	switch {
 	case clearErr != nil:
-		h.logger.Warn("expired CPA cooldown clear failed", "auth_index", authIndex, "recover_at_ms", recoverAtMS, "error", clearErr.Error())
+		result, details["step"], details["status_code"] = "failure", "cpa_reset", cpaErrorStatus(clearErr)
 	case evidenceErr != nil:
-		h.logger.Warn("CPA cooldown released but local evidence not cleared", "auth_index", authIndex, "recover_at_ms", recoverAtMS, "error", evidenceErr.Error())
-	default:
-		h.logger.Info("expired CPA cooldown cleared", "auth_index", authIndex, "recover_at_ms", recoverAtMS)
+		result, details["step"] = "failure", "evidence_wipe"
 	}
+	h.recordAuditWithoutRequest("quota.clear_cooldown.automatic", "quota", authIndex, result, details)
+}
+
+// cpaErrorStatus is the HTTP status of a CPA management error, or zero when it never answered.
+func cpaErrorStatus(err error) int {
+	var httpError *management.HTTPError
+	if errors.As(err, &httpError) {
+		return httpError.StatusCode
+	}
+	return 0
 }
