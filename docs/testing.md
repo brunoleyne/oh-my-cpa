@@ -1010,6 +1010,15 @@ the row's two lines (failed attempt versus outlived reset, and silence when neit
 applies), and `web/tests/credential-quota.component.test.tsx` renders the statement beside
 the retained numbers and the row's own refresh control.
 
+Automatic cooldown release follows the same split. `internal/quota/attempt_test.go` owns
+`quota.HasRestoredCapacity`, which excludes stale, disabled, unpublished and used-up
+readings. `internal/repository/quota_test.go` owns `BatchExpiredCooldowns`: evidence past
+the six-hour lookback still counts, while cleared rows, rows without a recovery time and a
+credential with a newer cooldown still in force do not. `internal/api/quota_auto_refresh_test.go`
+owns the wire against a gateway that counts `routing/cooldown/reset` calls: a read with
+room left releases the credential and wipes its evidence, an exhausted read keeps both,
+and a round releases only the credential whose cooldown fully recovered.
+
 ### Quota capacity coverage
 
 - `internal/quota/capacity_scope_test.go` owns complete family/exact identity matching,
